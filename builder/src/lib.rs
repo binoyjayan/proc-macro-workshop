@@ -2,9 +2,9 @@ use proc_macro::TokenStream;
 use syn::{parse_macro_input, DeriveInput};
 
 /// Function to unwrap the Option type or return None
-fn unwrap_option_type(ty: &syn::Type) -> Option<syn::Type> {
+fn unwrap_type(wrapper_type: &str, ty: &syn::Type) -> Option<syn::Type> {
     if let syn::Type::Path(syn::TypePath { path, .. }) = ty {
-        if path.segments.len() == 1 && path.segments[0].ident == "Option" {
+        if path.segments.len() == 1 && path.segments[0].ident == wrapper_type {
             if let syn::PathArguments::AngleBracketed(args) = &path.segments[0].arguments {
                 if let syn::GenericArgument::Type(ty) = args.args.first().unwrap() {
                     return Some(ty.clone());
@@ -15,7 +15,7 @@ fn unwrap_option_type(ty: &syn::Type) -> Option<syn::Type> {
     None
 }
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     let ident = &ast.ident;
@@ -38,7 +38,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let builder_fields = input_fields.named.iter().map(|f| {
         let ident = &f.ident;
         let orig_type = &f.ty;
-        if unwrap_option_type(orig_type).is_some() {
+        if unwrap_type("Option", orig_type).is_some() {
             quote::quote! {
                 #ident: #orig_type
             }
@@ -50,41 +50,105 @@ pub fn derive(input: TokenStream) -> TokenStream {
     });
 
     // Generate the setter methods for the builder
-    let builder_methods = input_fields.named.iter().map(|f| {
+    // Add attributes builders to the fields if they have the 'arg' attribute
+    // and if the field is extendable (here it is a Vec)
+    let mut builder_methods = Vec::new();
+
+    for f in &input_fields.named {
         let ident = &f.ident;
         let orig_type = &f.ty;
-        // Methods for the Option(al) types should accept the type itself
-        if let Some(inner_type) = unwrap_option_type(orig_type) {
-            quote::quote! {
-                pub fn #ident(&mut self, #ident: #inner_type) -> &mut Self {
-                    self.#ident = Some(#ident);
-                    self
-                }
-            }
-        } else {
-            quote::quote! {
-                pub fn #ident(&mut self, #ident: #orig_type) -> &mut Self {
-                    self.#ident = Some(#ident);
-                    self
+        let mut has_attr_method = false;
+
+        // Check for `builder(each = "...")` attribute
+        for attr in &f.attrs {
+            let path = &attr.path();
+            if path.is_ident("builder") {
+                let meta = attr.meta.clone();
+                if let syn::Meta::List(meta) = meta {
+                    let tokens = meta.tokens.clone();
+                    let mut tokens_iter = tokens.into_iter();
+                    if let Some(proc_macro2::TokenTree::Ident(each)) = tokens_iter.next() {
+                        if each == "each" {
+                            let _punct = tokens_iter.next();
+                            if let Some(proc_macro2::TokenTree::Literal(lit)) = tokens_iter.next() {
+                                if let syn::Lit::Str(lit) = syn::Lit::new(lit) {
+                                    let value = lit.value();
+                                    let arg = syn::Ident::new(&value, lit.span());
+                                    let inner_type = unwrap_type("Vec", orig_type).unwrap();
+                                    let val = quote::quote! {
+                                        pub fn #arg(&mut self, #arg: #inner_type) -> &mut Self {
+                                            if let Some(ref mut vec) = self.#ident {
+                                                vec.push(#arg);
+                                            } else {
+                                                self.#ident = Some(vec![#arg]);
+                                            }
+                                            self
+                                        }
+                                    };
+                                    // Prioritize attr_method, skip default builder method
+                                    builder_methods.push(val);
+                                    has_attr_method = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-    });
+
+        // If no attr_method was added, generate the usual builder method
+        if !has_attr_method {
+            if let Some(inner_type) = unwrap_type("Option", orig_type) {
+                builder_methods.push(quote::quote! {
+                    pub fn #ident(&mut self, #ident: #inner_type) -> &mut Self {
+                        self.#ident = Some(#ident);
+                        self
+                    }
+                });
+            } else {
+                builder_methods.push(quote::quote! {
+                    pub fn #ident(&mut self, #ident: #orig_type) -> &mut Self {
+                        self.#ident = Some(#ident);
+                        self
+                    }
+                });
+            }
+        }
+    }
 
     // Generate initializers for the build function
+    // let build_init = input_fields.named.iter().map(|f| {
+    //     let ident = &f.ident;
+    //     let orig_type = &f.ty;
+    //     // Option(al) types should not fail the build
+    //     if unwrap_type("Option", orig_type).is_some() {
+    //         return quote::quote! {
+    //             #ident: self.#ident.clone()
+    //         };
+    //     }
+    //     quote::quote! {
+    //         #ident: self.#ident.clone().ok_or(concat!(stringify!(#ident), " is required"))?
+    //     }
+    // });
     let build_init = input_fields.named.iter().map(|f| {
         let ident = &f.ident;
         let orig_type = &f.ty;
-        // Option(al) types should not fail the build
-        if unwrap_option_type(orig_type).is_some() {
-            return quote::quote! {
+    
+        if unwrap_type("Option", orig_type).is_some() {
+            quote::quote! {
                 #ident: self.#ident.clone()
-            };
+            }
+        } else if unwrap_type("Vec", orig_type).is_some() {
+            quote::quote! {
+                #ident: self.#ident.clone().unwrap_or_else(Vec::new)
+            }
+        } else {
+            quote::quote! {
+                #ident: self.#ident.clone().ok_or(concat!(stringify!(#ident), " is required"))?
+            }
         }
-        quote::quote! {
-            #ident: self.#ident.clone().ok_or(concat!(stringify!(#ident), " is required"))?
-        }
-    });
+    });    
 
     // Generate initializer for the builder that sets all fields to None
     // This is the default state of the builder
@@ -102,6 +166,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl #bident {
             #(#builder_methods)*
+
+            // #(#attr_methods)*
 
             pub fn build(&self) -> Result<#ident, Box<dyn std::error::Error>> {
                 Ok(#ident {
