@@ -1,5 +1,6 @@
 use proc_macro::TokenStream;
 use syn::{parse_macro_input, DeriveInput};
+use syn::spanned::Spanned;
 
 /// Function to unwrap the Option type or return None
 fn unwrap_type(wrapper_type: &str, ty: &syn::Type) -> Option<syn::Type> {
@@ -58,22 +59,24 @@ pub fn derive(input: TokenStream) -> TokenStream {
         let ident = &f.ident;
         let orig_type = &f.ty;
         let mut has_attr_method = false;
-
-        // Check for `builder(each = "...")` attribute
         for attr in &f.attrs {
             let path = &attr.path();
+            // Check for `builder(each = "...")` attribute
             if path.is_ident("builder") {
                 let meta = attr.meta.clone();
+                let meta_span = meta.span();
                 if let syn::Meta::List(meta) = meta {
                     let tokens = meta.tokens.clone();
                     let mut tokens_iter = tokens.into_iter();
                     if let Some(proc_macro2::TokenTree::Ident(each)) = tokens_iter.next() {
+                        let _punct = tokens_iter.next().unwrap();
+                        let value = tokens_iter.next();
                         if each == "each" {
-                            let _punct = tokens_iter.next();
-                            if let Some(proc_macro2::TokenTree::Literal(lit)) = tokens_iter.next() {
+                            if let Some(proc_macro2::TokenTree::Literal(lit)) = value {
                                 if let syn::Lit::Str(lit) = syn::Lit::new(lit) {
                                     let value = lit.value();
-                                    let arg = syn::Ident::new(&value, lit.span());
+                                    let lit_span = lit.span();
+                                    let arg = syn::Ident::new(&value, lit_span);
                                     let inner_type = unwrap_type("Vec", orig_type).unwrap();
                                     let val = quote::quote! {
                                         pub fn #arg(&mut self, #arg: #inner_type) -> &mut Self {
@@ -91,6 +94,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
                                     break;
                                 }
                             }
+                        } else {
+                            return syn::Error::new(meta_span, r#"`builder(each = "...")`"#)
+                                .to_compile_error()
+                                .into();
                         }
                     }
                 }
@@ -118,28 +125,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
     }
 
     // Generate initializers for the build function
-    // let build_init = input_fields.named.iter().map(|f| {
-    //     let ident = &f.ident;
-    //     let orig_type = &f.ty;
-    //     // Option(al) types should not fail the build
-    //     if unwrap_type("Option", orig_type).is_some() {
-    //         return quote::quote! {
-    //             #ident: self.#ident.clone()
-    //         };
-    //     }
-    //     quote::quote! {
-    //         #ident: self.#ident.clone().ok_or(concat!(stringify!(#ident), " is required"))?
-    //     }
-    // });
     let build_init = input_fields.named.iter().map(|f| {
         let ident = &f.ident;
         let orig_type = &f.ty;
-    
+
         if unwrap_type("Option", orig_type).is_some() {
             quote::quote! {
                 #ident: self.#ident.clone()
             }
         } else if unwrap_type("Vec", orig_type).is_some() {
+            // If the field is a Vec, it is initialized to an empty Vec if it is None
             quote::quote! {
                 #ident: self.#ident.clone().unwrap_or_else(Vec::new)
             }
@@ -148,7 +143,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 #ident: self.#ident.clone().ok_or(concat!(stringify!(#ident), " is required"))?
             }
         }
-    });    
+    });
 
     // Generate initializer for the builder that sets all fields to None
     // This is the default state of the builder
