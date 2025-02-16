@@ -80,10 +80,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
                                     let inner_type = unwrap_type("Vec", orig_type).unwrap();
                                     let val = quote::quote! {
                                         pub fn #arg(&mut self, #arg: #inner_type) -> &mut Self {
-                                            if let Some(ref mut vec) = self.#ident {
+                                            if let std::option::Option::Some(ref mut vec) = self.#ident {
                                                 vec.push(#arg);
                                             } else {
-                                                self.#ident = Some(vec![#arg]);
+                                                self.#ident = std::option::Option::Some(vec![#arg]);
                                             }
                                             self
                                         }
@@ -109,14 +109,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
             if let Some(inner_type) = unwrap_type("Option", orig_type) {
                 builder_methods.push(quote::quote! {
                     pub fn #ident(&mut self, #ident: #inner_type) -> &mut Self {
-                        self.#ident = Some(#ident);
+                        self.#ident = std::option::Option::Some(#ident);
                         self
                     }
                 });
             } else {
                 builder_methods.push(quote::quote! {
                     pub fn #ident(&mut self, #ident: #orig_type) -> &mut Self {
-                        self.#ident = Some(#ident);
+                        self.#ident = std::option::Option::Some(#ident);
                         self
                     }
                 });
@@ -150,7 +150,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let builder_init = input_fields.named.iter().map(|f| {
         let ident = &f.ident;
         quote::quote! {
-            #ident: None
+            #ident: std::option::Option::None
         }
     });
 
@@ -162,10 +162,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl #bident {
             #(#builder_methods)*
 
-            // #(#attr_methods)*
-
-            pub fn build(&self) -> Result<#ident, Box<dyn std::error::Error>> {
-                Ok(#ident {
+            pub fn build(&self) -> std::result::Result<#ident, std::boxed::Box<dyn std::error::Error>> {
+                std::result::Result::Ok(#ident {
                     #(#build_init,)*
                 })
             }
